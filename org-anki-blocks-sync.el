@@ -341,19 +341,28 @@ Returns t if successful, nil if failed."
             t)
         (error 
          (if (string-match-p "duplicate" (error-message-string err))
-             (progn
-               (org-anki-blocks-sync--handle-duplicate block deck model fields tags)
-               ;; Re-parse the block to get the updated properties
-               (goto-char (org-element-property :begin block))
-               (let* ((updated-block (org-element-at-point))
-                      (new-id (org-anki-blocks--get-property updated-block :id)))
-                 (if new-id
-                     (progn
-                       (message "Block synced successfully after duplicate resolution (ID: %s)" new-id)
-                       t)
+             (let ((dup-result (org-anki-blocks-sync--handle-duplicate block deck model fields tags)))
+               ;; Check if we need to update the duplicate strategy
+               (when (cdr dup-result)
+                 (setq org-anki-blocks-sync-duplicate-strategy (cdr dup-result))
+                 (message "Duplicate strategy set to: %s for remaining duplicates" (cdr dup-result)))
+               ;; Handle the result
+               (if (car dup-result)
                    (progn
-                     (message "Duplicate resolution skipped or failed - block not synced")
-                     nil))))
+                     ;; Re-parse the block to get the updated properties
+                     (goto-char (org-element-property :begin block))
+                     (let* ((updated-block (org-element-at-point))
+                            (new-id (org-anki-blocks--get-property updated-block :id)))
+                       (if new-id
+                           (progn
+                             (message "Block synced successfully after duplicate resolution (ID: %s)" new-id)
+                             t)
+                         (progn
+                           (message "Duplicate resolution succeeded but no ID found")
+                           t))))
+                 (progn
+                   (message "Duplicate resolution skipped")
+                   nil)))
            (signal (car err) (cdr err))))))
      ;; Update existing note
      (t
@@ -365,25 +374,35 @@ Returns t if successful, nil if failed."
 ;;; Duplicate Handling
 
 (defun org-anki-blocks-sync--handle-duplicate (block deck model fields tags)
-  "Handle duplicate note creation for BLOCK with DECK, MODEL, FIELDS, and TAGS."
+  "Handle duplicate note creation for BLOCK with DECK, MODEL, FIELDS, and TAGS.
+  Returns a list (result . strategy-change) where strategy-change can be nil or a new strategy."
   (let* ((front-field (or (cdr (assoc "Front" fields))
                          (cdr (assoc "Text" fields))
                          (cdr (car fields))))
          (choice (if (eq org-anki-blocks-sync-duplicate-strategy 'ask)
                      (org-anki-blocks-sync--ask-duplicate-resolution front-field)
-                   org-anki-blocks-sync-duplicate-strategy)))
+                   org-anki-blocks-sync-duplicate-strategy))
+         (result nil)
+         (new-strategy nil))
     (cond
-     ((eq choice 'replace-with-remote)
-      (org-anki-blocks-sync--replace-with-remote block deck fields))
-     ((eq choice 'replace-with-local)
-      (org-anki-blocks-sync--replace-with-local block deck model fields tags))
-     ((eq choice 'skip)
+     ((memq choice '(replace-with-remote replace-with-remote-all))
+      (setq result (org-anki-blocks-sync--replace-with-remote block deck fields))
+      (when (eq choice 'replace-with-remote-all)
+        (setq new-strategy 'replace-with-remote)))
+     ((memq choice '(replace-with-local replace-with-local-all))
+      (setq result (org-anki-blocks-sync--replace-with-local block deck model fields tags))
+      (when (eq choice 'replace-with-local-all)
+        (setq new-strategy 'replace-with-local)))
+     ((memq choice '(skip skip-all))
       (message "Skipped creating duplicate note")
-      nil)  ; Return nil for skip
+      (setq result nil)
+      (when (eq choice 'skip-all)
+        (setq new-strategy 'skip)))
      ((eq choice 'quit)
       (error "Sync cancelled by user"))
      (t
-      (error "Invalid duplicate resolution choice")))))
+      (error "Invalid duplicate resolution choice")))
+    (cons result new-strategy)))
 
 (defun org-anki-blocks-sync--ask-duplicate-resolution (front-content)
   "Ask user how to resolve duplicate with FRONT-CONTENT."
@@ -402,8 +421,11 @@ Returns t if successful, nil if failed."
       
       (insert (propertize "RESOLUTION OPTIONS:\n" 'face 'bold))
       (insert (propertize "  [r] Replace local with remote content\n" 'face 'success))
+      (insert (propertize "  [R] Replace local with remote for ALL duplicates\n" 'face 'success))
       (insert (propertize "  [l] Replace remote with local content (or delete all if multiple)\n" 'face 'warning))
+      (insert (propertize "  [L] Replace remote with local for ALL duplicates\n" 'face 'warning))
       (insert (propertize "  [s] Skip this note\n" 'face 'shadow))
+      (insert (propertize "  [S] Skip ALL duplicates\n" 'face 'shadow))
       (insert (propertize "  [q] Quit sync\n" 'face 'error))
       (insert "\n")
       (setq buffer-read-only t))
@@ -420,10 +442,13 @@ Returns t if successful, nil if failed."
               (let ((key (read-key "Choose duplicate resolution: ")))
                 (cond
                  ((eq key ?r) (setq choice 'replace-with-remote))
+                 ((eq key ?R) (setq choice 'replace-with-remote-all))
                  ((eq key ?l) (setq choice 'replace-with-local))
+                 ((eq key ?L) (setq choice 'replace-with-local-all))
                  ((eq key ?s) (setq choice 'skip))
+                 ((eq key ?S) (setq choice 'skip-all))
                  ((eq key ?q) (setq choice 'quit))
-                 (t (message "Invalid choice! Press [r], [l], [s], or [q]")
+                 (t (message "Invalid choice! Press [r/R], [l/L], [s/S], or [q]")
                     (sit-for 1)))))
             choice)
         ;; Clean up window and buffer
@@ -613,11 +638,13 @@ If DECK is specified, only sync cards from that deck."
   (let ((pushed 0)
         (errors 0)
         (skipped 0)
-        (cancelled nil))
-    (catch 'sync-cancelled
-      ;; Process blocks from end to beginning to avoid position shifts
-      (let ((blocks (nreverse (org-anki-blocks--find-all))))
-        (dolist (block blocks)
+        (cancelled nil)
+        (original-duplicate-strategy org-anki-blocks-sync-duplicate-strategy))
+    (unwind-protect
+        (catch 'sync-cancelled
+          ;; Process blocks from end to beginning to avoid position shifts
+          (let ((blocks (nreverse (org-anki-blocks--find-all))))
+            (dolist (block blocks)
           (condition-case err
               (when (or (not (org-anki-blocks--get-property block :id))
                         (org-anki-blocks--get-property block :modified)
@@ -635,6 +662,8 @@ If DECK is specified, only sync cards from that deck."
                    (throw 'sync-cancelled nil))
                (cl-incf errors)
                (message "Error pushing note: %s" (error-message-string err))))))))
+      ;; Restore original duplicate strategy
+      (setq org-anki-blocks-sync-duplicate-strategy original-duplicate-strategy))
     (if cancelled
         (message "Sync cancelled by user after %d notes pushed, %d skipped" pushed skipped)
       (message "Push complete: %d notes pushed, %d skipped, %d errors" pushed skipped errors))))

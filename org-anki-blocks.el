@@ -67,8 +67,10 @@
   (interactive)
   (if-let ((block (org-anki-blocks--find-at-point)))
       (condition-case err
-          (when (org-anki-blocks-sync--push-note block)
-            (message "Block synced successfully"))
+          (progn
+            (require 'org-anki-blocks-sync)
+            (when (org-anki-blocks-sync--push-note block)
+              (message "Block synced successfully")))
         (error
          (message "Error syncing block: %s" (error-message-string err))))
     (user-error "No anki block at point")))
@@ -83,13 +85,15 @@
 (defun org-anki-blocks-pull ()
   "Pull changes from Anki to current buffer."
   (interactive)
-  (org-anki-blocks-sync--pull))
+  (require 'org-anki-blocks-sync)
+  (org-anki-blocks-sync-pull))
 
 ;;;###autoload
 (defun org-anki-blocks-push ()
   "Push changes from current buffer to Anki."
   (interactive)
-  (org-anki-blocks-sync--push))
+  (require 'org-anki-blocks-sync)
+  (org-anki-blocks-sync-push))
 
 ;;;###autoload
 (defun org-anki-blocks-insert ()
@@ -189,8 +193,10 @@
   :keymap org-anki-blocks-mode-map
   (if org-anki-blocks-mode
       (when org-anki-blocks-sync-on-save
-        (org-anki-blocks-sync--enable-auto-sync))
-    (org-anki-blocks-sync--disable-auto-sync)))
+        (require 'org-anki-blocks-sync)
+        (org-anki-blocks-sync-enable-auto-sync))
+    (require 'org-anki-blocks-sync)
+    (org-anki-blocks-sync-disable-auto-sync)))
 
 ;;; Setup
 
