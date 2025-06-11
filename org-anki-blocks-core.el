@@ -141,17 +141,19 @@ ARGS can contain :fields followed by an alist, and other properties."
         (let ((lines (split-string (cdr field) "\n")))
           (dolist (line lines)
             (unless (string-empty-p line)
-              (insert (format "    %s\n" line)))))))
+              (insert (format "    %s\n" line)))))))))
 
 ;;; Field Management
 
 (defun org-anki-blocks--get-fields (block)
   "Extract field alist from anki BLOCK."
-  (save-excursion
-    (goto-char (org-element-property :contents-begin block))
-    (let ((end (org-element-property :contents-end block))
-          (fields nil)
-          (current-field nil))
+  (let ((begin (org-element-property :contents-begin block))
+        (end (org-element-property :contents-end block)))
+    (if (and begin end)
+        (save-excursion
+          (goto-char begin)
+          (let ((fields nil)
+                (current-field nil))
       (while (< (point) end)
         (cond
          ;; Field header
@@ -170,12 +172,14 @@ ARGS can contain :fields followed by an alist, and other properties."
                             content
                           (concat (cdr current-field) "\n" content)))))))
         (forward-line))
-      ;; Add last field
-      (when current-field
-        (push (cons (car current-field) 
-                   (string-trim (cdr current-field)))
-              fields))
-      (nreverse fields))))
+            ;; Add last field
+            (when current-field
+              (push (cons (car current-field) 
+                         (string-trim (cdr current-field)))
+                    fields))
+            (nreverse fields)))
+      ;; Return empty list if no contents
+      nil)))
 
 ;;; Block Creation
 
@@ -212,17 +216,16 @@ PROPERTIES should include :deck, :type, and :fields (alist)."
          (id (plist-get properties :id))
          (hash (plist-get properties :hash))
          (params nil))
-    ;; Build parameter list
-    (push (format ":deck %s" deck) params)
-    (push (format ":type %s" type) params)
-    (when tags
-      (push (format ":tags %s" (mapconcat #'identity tags ",")) params))
+    ;; Build parameter list in correct order
+    (setq params (list (format ":deck %s" deck)
+                       (format ":type %s" type)))
     (when id
-      (push (format ":id %s" 
-                   (if (numberp id) (number-to-string id) id))
-            params))
+      (setq params (append params (list (format ":id %s" 
+                                               (if (numberp id) (number-to-string id) id))))))
+    (when tags
+      (setq params (append params (list (format ":tags %s" (mapconcat #'identity tags ","))))))
     (when hash
-      (push (format ":hash %s" hash) params))
+      (setq params (append params (list (format ":hash %s" hash)))))
     ;; Insert block
     (insert (format "#+begin_anki %s\n" (mapconcat #'identity params " ")))
     ;; Insert fields
@@ -324,8 +327,6 @@ Returns nil if valid, or a string describing the issue."
                 issue)))
     (message "Validation complete: %d/%d blocks have issues"
             invalid (length blocks))))
-
-))
 
 (provide 'org-anki-blocks-core)
 ;;; org-anki-blocks-core.el ends here

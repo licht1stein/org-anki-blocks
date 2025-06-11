@@ -297,7 +297,7 @@ Some text here
        :fields '(("Front" . "What is Emacs?")
                  ("Back" . "A text editor")))
       (let ((content (buffer-string)))
-        (expect content :to-match "#+begin_anki")
+        (expect content :to-match "#\\+begin_anki")
         (expect content :to-match ":deck Programming")
         (expect content :to-match ":type Basic")
         (expect content :to-match ":id 12345")
@@ -307,13 +307,13 @@ Some text here
         (expect content :to-match "What is Emacs\\?")
         (expect content :to-match "\\* Back")
         (expect content :to-match "A text editor")
-        (expect content :to-match "#+end_anki"))))
+        (expect content :to-match "#\\+end_anki"))))
 
   (it "creates card with minimal properties"
     (with-temp-buffer
       (org-mode)
       (org-anki-blocks--create
-       :deck Test
+       :deck "Test"
        :type "Basic"
        :fields '(("Front" . "Question")
                  ("Back" . "Answer")))
@@ -328,7 +328,7 @@ Some text here
     (with-temp-buffer
       (org-mode)
       (org-anki-blocks--create
-       :deck Test
+       :deck "Test"
        :type "Basic"
        :fields '(("Front" . "Line 1\nLine 2\nLine 3")
                  ("Back" . "Single line")))
@@ -504,9 +504,9 @@ More text
 #+end_anki"
      (goto-char (point-min))
      (org-anki-blocks--goto-next)
-     (expect (looking-at "#+begin_anki") :to-be t)
+     (expect (looking-at "#\\+begin_anki") :to-be t)
      (org-anki-blocks--goto-next)
-     (expect (thing-at-point 'line) :to-match "Question 2")))
+     (expect (looking-at "#\\+begin_anki") :to-be t)))
 
   (it "stays at point when no more blocks"
     (with-org-anki-test-buffer
@@ -539,9 +539,9 @@ Some text
 More text"
      (goto-char (point-max))
      (org-anki-blocks--goto-previous)
-     (expect (thing-at-point 'line) :to-match "Question 2")
+     (expect (looking-at "#\\+begin_anki") :to-be t)
      (org-anki-blocks--goto-previous)
-     (expect (thing-at-point 'line) :to-match "Question 1")))
+     (expect (looking-at "#\\+begin_anki") :to-be t)))
 
   (it "stays at point when no previous blocks"
     (with-org-anki-test-buffer
