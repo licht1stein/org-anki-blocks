@@ -67,8 +67,7 @@
   (interactive)
   (if-let ((block (org-anki-blocks--find-at-point)))
       (condition-case err
-          (progn
-            (org-anki-blocks-sync--push-note block)
+          (when (org-anki-blocks-sync--push-note block)
             (message "Block synced successfully"))
         (error
          (message "Error syncing block: %s" (error-message-string err))))

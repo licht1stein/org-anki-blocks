@@ -288,7 +288,8 @@ Set to nil to never auto-purge."
                              :hash (org-anki-blocks-sync--compute-hash fields)))))
 
 (defun org-anki-blocks-sync--push-note (block)
-  "Push BLOCK to Anki."
+  "Push BLOCK to Anki.
+Returns t if successful, nil if failed."
   (let* ((id (org-anki-blocks--get-property block :id))
          (deck (org-anki-blocks--get-property block :deck))
          (model (org-anki-blocks--get-property block :type))
@@ -307,25 +308,38 @@ Set to nil to never auto-purge."
      (deleted
       (when id
         (org-anki-blocks-connect--delete-notes (list id))
-        (org-anki-blocks--remove block)))
+        (org-anki-blocks--remove block)
+        t))
      ;; Create new note
      ((not id)
       (condition-case err
           (let ((new-id (org-anki-blocks-connect--add-note deck model fields tags)))
             (org-anki-blocks--update block
                                    :id (format "%s" new-id)
-                                   :hash (org-anki-blocks-sync--compute-hash fields)))
+                                   :hash (org-anki-blocks-sync--compute-hash fields))
+            t)
         (error 
          (if (string-match-p "duplicate" (error-message-string err))
              (progn
                (org-anki-blocks-sync--handle-duplicate block deck model fields tags)
-               (message "Block synced successfully after duplicate resolution"))
+               ;; Re-parse the block to get the updated properties
+               (goto-char (org-element-property :begin block))
+               (let* ((updated-block (org-element-at-point))
+                      (new-id (org-anki-blocks--get-property updated-block :id)))
+                 (if new-id
+                     (progn
+                       (message "Block synced successfully after duplicate resolution (ID: %s)" new-id)
+                       t)
+                   (progn
+                     (message "Duplicate resolution skipped or failed - block not synced")
+                     nil))))
            (signal (car err) (cdr err))))))
      ;; Update existing note
      (t
       (org-anki-blocks-connect--update-note id fields)
       (org-anki-blocks--update block
-                             :hash (org-anki-blocks-sync--compute-hash fields))))))
+                             :hash (org-anki-blocks-sync--compute-hash fields))
+      t))))
 
 ;;; Duplicate Handling
 
@@ -340,6 +354,8 @@ Set to nil to never auto-purge."
       (org-anki-blocks-sync--find-and-link-existing block deck fields))
      ((eq choice 'force-create)
       (org-anki-blocks-sync--force-create-note block deck model fields tags))
+     ((eq choice 'delete-and-create)
+      (org-anki-blocks-sync--delete-duplicates-and-create block deck model fields tags))
      ((eq choice 'skip)
       (message "Skipped creating duplicate note"))
      (t
@@ -363,6 +379,7 @@ Set to nil to never auto-purge."
       (insert (propertize "RESOLUTION OPTIONS:\n" 'face 'bold))
       (insert (propertize "  [f] Find and link to existing note\n" 'face 'success))
       (insert (propertize "  [c] Force create new note (modify content slightly)\n" 'face 'warning))
+      (insert (propertize "  [d] Delete ALL remote duplicates and create new\n" 'face 'error))
       (insert (propertize "  [s] Skip this note\n" 'face 'shadow))
       (insert (propertize "  [q] Quit sync\n" 'face 'error))
       (insert "\n")
@@ -379,9 +396,10 @@ Set to nil to never auto-purge."
                 (cond
                  ((eq key ?f) (setq choice 'find-existing))
                  ((eq key ?c) (setq choice 'force-create))
+                 ((eq key ?d) (setq choice 'delete-and-create))
                  ((eq key ?s) (setq choice 'skip))
                  ((eq key ?q) (error "Sync cancelled by user"))
-                 (t (message "Invalid choice! Press [f], [c], [s], or [q]")
+                 (t (message "Invalid choice! Press [f], [c], [d], [s], or [q]")
                     (sit-for 1)))))
             choice)
         ;; Clean up window and buffer
@@ -463,6 +481,39 @@ Set to nil to never auto-purge."
       (error
        (error "Failed to create note even with modified content: %s" 
               (error-message-string err))))))
+
+(defun org-anki-blocks-sync--delete-duplicates-and-create (block deck model fields tags)
+  "Delete all duplicate notes and create a new one for BLOCK."
+  (message "Finding all duplicate notes...")
+  (let* ((search-term (or (cdr (assoc "Front" fields))
+                         (cdr (assoc "Text" fields))
+                         (cdr (car fields))))
+         ;; Search for notes with similar content
+         (query (format "deck:\"%s\" \"%s\"" deck (substring search-term 0 (min 50 (length search-term)))))
+         (duplicate-ids (org-anki-blocks-connect--find-notes query)))
+    
+    (if duplicate-ids
+        (progn
+          (message "Found %d duplicate notes" (length duplicate-ids))
+          ;; Confirm deletion
+          (when (yes-or-no-p (format "Delete ALL %d duplicate notes and create new? " 
+                                     (length duplicate-ids)))
+            ;; Delete all duplicates
+            (condition-case err
+                (progn
+                  (org-anki-blocks-connect--delete-notes duplicate-ids)
+                  (message "Deleted %d duplicate notes" (length duplicate-ids))
+                  
+                  ;; Now create the new note
+                  (let ((new-id (org-anki-blocks-connect--add-note deck model fields tags)))
+                    (org-anki-blocks--update block
+                                           :id (format "%s" new-id)
+                                           :hash (org-anki-blocks-sync--compute-hash fields))
+                    (message "Created new note with ID: %s" new-id)))
+              (error
+               (error "Failed to delete duplicates or create new note: %s"
+                      (error-message-string err))))))
+      (message "No duplicates found to delete"))))
 
 ;;; Main Sync Functions
 
