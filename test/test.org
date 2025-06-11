@@ -1,0 +1,29 @@
+* Test Deck for org-anki-blocks
+
+#+begin_anki :deck test-deck :type Basic :id 1234567890 :hash abc12345
+  * Front
+    What is the capital of France?
+  * Back
+    Paris
+#+end_anki
+
+#+begin_anki :deck test-deck :type Basic
+  * Front
+    What programming language is Emacs written in?
+  * Back
+    Emacs Lisp (Elisp)
+#+end_anki
+
+#+begin_anki :deck test-deck :type Cloze
+  * Text
+    The {{c1::Quick Brown Fox}} jumps over the {{c2::lazy dog}}.
+  * Extra
+    Classic pangram sentence
+#+end_anki
+
+#+begin_anki :deck test-deck :type Basic
+  * Front
+    What does TDD stand for?
+  * Back
+    Test-Driven Development
+#+end_anki

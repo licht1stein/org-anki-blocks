@@ -36,6 +36,19 @@ Possible values:
                  (const :tag "Newer wins" newer-wins))
   :group 'org-anki-blocks-sync)
 
+(defcustom org-anki-blocks-sync-duplicate-strategy 'ask
+  "Strategy for handling duplicate notes during sync.
+Possible values:
+- `ask': Prompt user to resolve duplicates (default)
+- `replace-with-remote': Update the local block with content from the remote duplicate
+- `replace-with-local': Update remote with local content (or delete all if multiple)
+- `skip': Skip creating duplicate notes"
+  :type '(choice (const :tag "Ask user" ask)
+                 (const :tag "Replace local with remote" replace-with-remote)
+                 (const :tag "Replace remote with local" replace-with-local)
+                 (const :tag "Skip duplicates" skip))
+  :group 'org-anki-blocks-sync)
+
 (defcustom org-anki-blocks-sync-on-save nil
   "Automatically sync when saving org files containing anki blocks."
   :type 'boolean
@@ -127,9 +140,11 @@ Set to nil to never auto-purge."
       (setq buffer-read-only t)
       (goto-char (point-min)))
     
-    (let ((window (display-buffer buffer '(display-buffer-pop-up-window . nil))))
+    (let ((window (display-buffer buffer '(display-buffer-pop-up-window 
+                                          (window-height . 0.8)
+                                          (window-width . 0.9)))))
       (select-window window)
-      (fit-window-to-buffer window)
+      (fit-window-to-buffer window nil nil 10 40)
       
       (unwind-protect
           (org-anki-blocks-sync--handle-conflict-input conflict buffer)
@@ -169,6 +184,8 @@ Set to nil to never auto-purge."
           (propertize "[r] Use REMOTE version\n" 'face 'warning))
   (insert (propertize "  [m] Merge interactively  " 'face 'info) 
           (propertize "[s] Skip this conflict\n" 'face 'shadow))
+  (insert (propertize "  [L] Use LOCAL for ALL remaining    " 'face 'success))
+  (insert (propertize "[R] Use REMOTE for ALL remaining\n" 'face 'warning))
   (insert (propertize "  [q] Quit conflict resolution\n" 'face 'error))
   (insert (propertize "═══════════════════════════════════════════════════════════════════════════════\n" 'face 'bold))
   (insert "\nPress a key to choose resolution..."))
@@ -187,11 +204,13 @@ Set to nil to never auto-purge."
         (message-displayed nil))
     (while (not choice)
       (let ((key (read-key (if message-displayed 
-                              "Invalid choice! Press [l]ocal, [r]emote, [m]erge, [s]kip, or [q]uit: "
+                              "Invalid choice! Press [l/L]ocal, [r/R]emote, [m]erge, [s]kip, or [q]uit: "
                             "Choose resolution: "))))
         (cond
          ((eq key ?l) (setq choice 'local))
          ((eq key ?r) (setq choice 'remote))
+         ((eq key ?L) (setq choice 'local-all))
+         ((eq key ?R) (setq choice 'remote-all))
          ((eq key ?m) (setq choice (org-anki-blocks-sync--merge-interactive conflict)))
          ((eq key ?s) (setq choice 'skip))
          ((eq key ?q) (setq choice 'quit))
@@ -234,9 +253,11 @@ Set to nil to never auto-purge."
           (insert (propertize "  [s] Skip field   [q] Cancel merge\n" 'face 'shadow))
           (setq buffer-read-only t))
         
-        (let ((window (display-buffer buffer '(display-buffer-pop-up-window . nil))))
+        (let ((window (display-buffer buffer '(display-buffer-pop-up-window 
+                                              (window-height . 0.8)
+                                              (window-width . 0.9)))))
           (select-window window)
-          (fit-window-to-buffer window)
+          (fit-window-to-buffer window nil nil 10 40)
           
           (while (not choice)
             (let ((key (read-key "Choose field value: ")))
@@ -348,16 +369,19 @@ Returns t if successful, nil if failed."
   (let* ((front-field (or (cdr (assoc "Front" fields))
                          (cdr (assoc "Text" fields))
                          (cdr (car fields))))
-         (choice (org-anki-blocks-sync--ask-duplicate-resolution front-field)))
+         (choice (if (eq org-anki-blocks-sync-duplicate-strategy 'ask)
+                     (org-anki-blocks-sync--ask-duplicate-resolution front-field)
+                   org-anki-blocks-sync-duplicate-strategy)))
     (cond
-     ((eq choice 'find-existing)
-      (org-anki-blocks-sync--find-and-link-existing block deck fields))
-     ((eq choice 'force-create)
-      (org-anki-blocks-sync--force-create-note block deck model fields tags))
-     ((eq choice 'delete-and-create)
-      (org-anki-blocks-sync--delete-duplicates-and-create block deck model fields tags))
+     ((eq choice 'replace-with-remote)
+      (org-anki-blocks-sync--replace-with-remote block deck fields))
+     ((eq choice 'replace-with-local)
+      (org-anki-blocks-sync--replace-with-local block deck model fields tags))
      ((eq choice 'skip)
-      (message "Skipped creating duplicate note"))
+      (message "Skipped creating duplicate note")
+      nil)  ; Return nil for skip
+     ((eq choice 'quit)
+      (error "Sync cancelled by user"))
      (t
       (error "Invalid duplicate resolution choice")))))
 
@@ -377,29 +401,29 @@ Returns t if successful, nil if failed."
       (insert (format "%s\n\n" (org-anki-blocks-sync--truncate-content front-content 200)))
       
       (insert (propertize "RESOLUTION OPTIONS:\n" 'face 'bold))
-      (insert (propertize "  [f] Find and link to existing note\n" 'face 'success))
-      (insert (propertize "  [c] Force create new note (modify content slightly)\n" 'face 'warning))
-      (insert (propertize "  [d] Delete ALL remote duplicates and create new\n" 'face 'error))
+      (insert (propertize "  [r] Replace local with remote content\n" 'face 'success))
+      (insert (propertize "  [l] Replace remote with local content (or delete all if multiple)\n" 'face 'warning))
       (insert (propertize "  [s] Skip this note\n" 'face 'shadow))
       (insert (propertize "  [q] Quit sync\n" 'face 'error))
       (insert "\n")
       (setq buffer-read-only t))
     
-    (let ((window (display-buffer buffer '(display-buffer-pop-up-window . nil))))
+    (let ((window (display-buffer buffer '(display-buffer-pop-up-window 
+                                          (window-height . 0.7)
+                                          (window-width . 0.8)))))
       (select-window window)
-      (fit-window-to-buffer window)
+      (fit-window-to-buffer window nil nil 10 30)
       
       (unwind-protect
           (let ((choice nil))
             (while (not choice)
               (let ((key (read-key "Choose duplicate resolution: ")))
                 (cond
-                 ((eq key ?f) (setq choice 'find-existing))
-                 ((eq key ?c) (setq choice 'force-create))
-                 ((eq key ?d) (setq choice 'delete-and-create))
+                 ((eq key ?r) (setq choice 'replace-with-remote))
+                 ((eq key ?l) (setq choice 'replace-with-local))
                  ((eq key ?s) (setq choice 'skip))
-                 ((eq key ?q) (error "Sync cancelled by user"))
-                 (t (message "Invalid choice! Press [f], [c], [d], [s], or [q]")
+                 ((eq key ?q) (setq choice 'quit))
+                 (t (message "Invalid choice! Press [r], [l], [s], or [q]")
                     (sit-for 1)))))
             choice)
         ;; Clean up window and buffer
@@ -414,8 +438,8 @@ Returns t if successful, nil if failed."
       (concat (substring content 0 (- max-length 3)) "...")
     content))
 
-(defun org-anki-blocks-sync--find-and-link-existing (block deck fields)
-  "Find existing note in DECK with similar FIELDS and link BLOCK to it."
+(defun org-anki-blocks-sync--replace-with-remote (block deck fields)
+  "Replace local BLOCK content with remote duplicate content."
   (let* ((search-term (or (cdr (assoc "Front" fields))
                          (cdr (assoc "Text" fields))
                          (cdr (car fields))))
@@ -427,12 +451,48 @@ Returns t if successful, nil if failed."
                (matching-note (org-anki-blocks-sync--find-best-match fields notes-info)))
           (if matching-note
               (let ((note-id (alist-get 'noteId matching-note)))
-                (org-anki-blocks--update block 
-                                       :id (format "%s" note-id)
-                                       :hash (org-anki-blocks-sync--compute-hash fields))
-                (message "Linked to existing note ID: %s" note-id))
-            (message "Could not find exact match among %d similar notes" (length note-ids))))
-      (message "No similar notes found in deck %s" deck))))
+                ;; Update local block with remote content
+                (org-anki-blocks-sync--pull-note matching-note)
+                (message "Replaced local content with remote note ID: %s" note-id)
+                t)  ; Return success
+            (progn
+              (message "Could not find exact match among %d similar notes" (length note-ids))
+              nil)))  ; Return failure
+      (progn
+        (message "No similar notes found in deck %s" deck)
+        nil))))  ; Return failure
+
+(defun org-anki-blocks-sync--replace-with-local (block deck model fields tags)
+  "Replace remote duplicate(s) with local BLOCK content.
+If there's only one remote duplicate, update it.
+If there are multiple duplicates, delete all and create new."
+  (let* ((search-term (or (cdr (assoc "Front" fields))
+                         (cdr (assoc "Text" fields))
+                         (cdr (car fields))))
+         ;; Search for notes with similar content
+         (query (format "deck:\"%s\" \"%s\"" deck (substring search-term 0 (min 50 (length search-term)))))
+         (duplicate-ids (org-anki-blocks-connect--find-notes query))
+         (num-duplicates (length duplicate-ids)))
+    (cond
+     ;; No duplicates found
+     ((= num-duplicates 0)
+      (message "No duplicates found in deck %s" deck)
+      nil)
+     ;; Single duplicate - update it
+     ((= num-duplicates 1)
+      (let ((note-id (car duplicate-ids)))
+        (message "Updating single duplicate note ID: %s" note-id)
+        ;; Update the existing note with local content
+        (org-anki-blocks-connect--update-note note-id fields)
+        ;; Link the local block to this note
+        (org-anki-blocks--update block
+                               :id (format "%s" note-id)
+                               :hash (org-anki-blocks-sync--compute-hash fields))
+        (message "Updated remote duplicate with local content")
+        t))  ; Return success
+     ;; Multiple duplicates - delete all and create new
+     (t
+      (org-anki-blocks-sync--delete-duplicates-and-create block deck model fields tags)))))
 
 (defun org-anki-blocks-sync--find-best-match (fields notes-info)
   "Find the best matching note from NOTES-INFO for FIELDS."
@@ -461,59 +521,48 @@ Returns t if successful, nil if failed."
         (/ (float matching-fields) total-fields)
       0)))
 
-(defun org-anki-blocks-sync--force-create-note (block deck model fields tags)
-  "Force create a note for BLOCK by modifying FIELDS to avoid duplicates."
-  (let* ((modified-fields (copy-sequence fields))
-         (front-field (or (assoc "Front" modified-fields)
-                         (assoc "Text" modified-fields)
-                         (car modified-fields))))
-    (when front-field
-      ;; Add a small suffix to make it unique
-      (setcdr front-field (concat (cdr front-field) " (variant)")))
-    
-    (condition-case err
-        (let ((new-id (org-anki-blocks-connect--add-note deck model modified-fields tags)))
-          (org-anki-blocks--update block
-                                 :id (format "%s" new-id)
-                                 :fields modified-fields
-                                 :hash (org-anki-blocks-sync--compute-hash modified-fields))
-          (message "Created note with modified content to avoid duplicate"))
-      (error
-       (error "Failed to create note even with modified content: %s" 
-              (error-message-string err))))))
-
 (defun org-anki-blocks-sync--delete-duplicates-and-create (block deck model fields tags)
-  "Delete all duplicate notes and create a new one for BLOCK."
+  "Delete all duplicate notes and create a new one for BLOCK.
+Returns t if successful, nil if no action taken."
   (message "Finding all duplicate notes...")
   (let* ((search-term (or (cdr (assoc "Front" fields))
                          (cdr (assoc "Text" fields))
                          (cdr (car fields))))
          ;; Search for notes with similar content
          (query (format "deck:\"%s\" \"%s\"" deck (substring search-term 0 (min 50 (length search-term)))))
-         (duplicate-ids (org-anki-blocks-connect--find-notes query)))
+         (duplicate-ids (org-anki-blocks-connect--find-notes query))
+         ;; Check if we're in batch mode
+         (batch-mode (not (eq org-anki-blocks-sync-duplicate-strategy 'ask))))
     
     (if duplicate-ids
         (progn
           (message "Found %d duplicate notes" (length duplicate-ids))
-          ;; Confirm deletion
-          (when (yes-or-no-p (format "Delete ALL %d duplicate notes and create new? " 
-                                     (length duplicate-ids)))
-            ;; Delete all duplicates
-            (condition-case err
-                (progn
-                  (org-anki-blocks-connect--delete-notes duplicate-ids)
-                  (message "Deleted %d duplicate notes" (length duplicate-ids))
-                  
-                  ;; Now create the new note
-                  (let ((new-id (org-anki-blocks-connect--add-note deck model fields tags)))
-                    (org-anki-blocks--update block
-                                           :id (format "%s" new-id)
-                                           :hash (org-anki-blocks-sync--compute-hash fields))
-                    (message "Created new note with ID: %s" new-id)))
-              (error
-               (error "Failed to delete duplicates or create new note: %s"
-                      (error-message-string err))))))
-      (message "No duplicates found to delete"))))
+          ;; Confirm deletion only in interactive mode
+          (if (or batch-mode
+                  (yes-or-no-p (format "Delete ALL %d duplicate notes and create new? " 
+                                       (length duplicate-ids))))
+              ;; Delete all duplicates
+              (condition-case err
+                  (progn
+                    (org-anki-blocks-connect--delete-notes duplicate-ids)
+                    (message "Deleted %d duplicate notes" (length duplicate-ids))
+                    
+                    ;; Now create the new note
+                    (let ((new-id (org-anki-blocks-connect--add-note deck model fields tags)))
+                      (org-anki-blocks--update block
+                                             :id (format "%s" new-id)
+                                             :hash (org-anki-blocks-sync--compute-hash fields))
+                      (message "Created new note with ID: %s" new-id))
+                    t)  ; Return success
+                (error
+                 (error "Failed to delete duplicates or create new note: %s"
+                        (error-message-string err))))
+            (progn
+              (message "Cancelled deleting duplicates")
+              nil)))  ; Return nil if cancelled
+      (progn
+        (message "No duplicates found to delete")
+        nil))))  ; Return nil if no duplicates
 
 ;;; Main Sync Functions
 
@@ -561,20 +610,34 @@ If DECK is specified, only sync cards from that deck."
 (defun org-anki-blocks-sync-push ()
   "Push local changes to Anki."
   (interactive)
-  (let ((blocks (org-anki-blocks--find-all))
-        (pushed 0)
-        (errors 0))
-    (dolist (block blocks)
-      (condition-case err
-          (when (or (not (org-anki-blocks--get-property block :id))
-                    (org-anki-blocks--get-property block :modified)
-                    (org-anki-blocks--get-property block :deleted))
-            (org-anki-blocks-sync--push-note block)
-            (cl-incf pushed))
-        (error
-         (cl-incf errors)
-         (message "Error pushing note: %s" (error-message-string err)))))
-    (message "Push complete: %d notes pushed, %d errors" pushed errors)))
+  (let ((pushed 0)
+        (errors 0)
+        (skipped 0)
+        (cancelled nil))
+    (catch 'sync-cancelled
+      ;; Process blocks from end to beginning to avoid position shifts
+      (let ((blocks (nreverse (org-anki-blocks--find-all))))
+        (dolist (block blocks)
+          (condition-case err
+              (when (or (not (org-anki-blocks--get-property block :id))
+                        (org-anki-blocks--get-property block :modified)
+                        (org-anki-blocks--get-property block :deleted))
+                (let ((result (org-anki-blocks-sync--push-note block)))
+                  (cond
+                   ((eq result t) (cl-incf pushed))
+                   ((eq result nil) (cl-incf skipped))
+                   (t (cl-incf pushed)))))  ; For backwards compatibility
+            (error
+             ;; Check if user cancelled sync
+             (if (string-match-p "cancelled by user" (error-message-string err))
+                 (progn
+                   (setq cancelled t)
+                   (throw 'sync-cancelled nil))
+               (cl-incf errors)
+               (message "Error pushing note: %s" (error-message-string err))))))))
+    (if cancelled
+        (message "Sync cancelled by user after %d notes pushed, %d skipped" pushed skipped)
+      (message "Push complete: %d notes pushed, %d skipped, %d errors" pushed skipped errors))))
 
 (defun org-anki-blocks-sync-all ()
   "Perform full 2-way sync."
@@ -594,27 +657,46 @@ If DECK is specified, only sync cards from that deck."
 
 (defun org-anki-blocks-sync--process-conflicts (conflicts)
   "Process list of CONFLICTS."
-  (catch 'quit-conflicts
-    (dolist (conflict conflicts)
-      (let ((resolution (org-anki-blocks-sync--resolve-conflict conflict)))
-        (cond
-         ((eq resolution 'local)
-          (org-anki-blocks-sync--push-note (alist-get 'block conflict)))
-         ((eq resolution 'remote)
-          (org-anki-blocks-sync--pull-note
-           `((noteId . ,(alist-get 'id conflict))
-             (fields . ,(org-anki-blocks-sync--fields-to-remote-format
-                        (alist-get 'remote conflict))))))
-         ((and (consp resolution) (eq (car resolution) 'merged))
-          (let ((block (alist-get 'block conflict))
-                (merged-fields (cdr resolution)))
-            (org-anki-blocks--update block :fields merged-fields)
-            (org-anki-blocks-sync--push-note block)))
+  (let ((remaining-strategy nil)
+        (conflicts-processed 0)
+        (total-conflicts (length conflicts)))
+    (catch 'quit-conflicts
+      (dolist (conflict conflicts)
+        (cl-incf conflicts-processed)
+        (let ((resolution (if remaining-strategy
+                             remaining-strategy
+                           (let ((res (org-anki-blocks-sync--resolve-conflict conflict)))
+                             ;; Check if user chose to apply to all
+                             (cond
+                              ((eq res 'local-all)
+                               (setq remaining-strategy 'local)
+                               (message "Using LOCAL for all remaining %d conflicts" 
+                                       (- total-conflicts conflicts-processed))
+                               'local)
+                              ((eq res 'remote-all)
+                               (setq remaining-strategy 'remote)
+                               (message "Using REMOTE for all remaining %d conflicts" 
+                                       (- total-conflicts conflicts-processed))
+                               'remote)
+                              (t res))))))
+          (cond
+           ((eq resolution 'local)
+            (org-anki-blocks-sync--push-note (alist-get 'block conflict)))
+           ((eq resolution 'remote)
+            (org-anki-blocks-sync--pull-note
+             `((noteId . ,(alist-get 'id conflict))
+               (fields . ,(org-anki-blocks-sync--fields-to-remote-format
+                          (alist-get 'remote conflict))))))
+           ((and (consp resolution) (eq (car resolution) 'merged))
+            (let ((block (alist-get 'block conflict))
+                  (merged-fields (cdr resolution)))
+              (org-anki-blocks--update block :fields merged-fields)
+              (org-anki-blocks-sync--push-note block)))
          ((eq resolution 'skip)
           (message "Skipped conflict for note %s" (alist-get 'id conflict)))
          ((eq resolution 'quit)
           (message "Conflict resolution cancelled by user")
-          (throw 'quit-conflicts nil)))))))
+          (throw 'quit-conflicts nil))))))))
 
 (defun org-anki-blocks-sync--fields-to-remote-format (fields)
   "Convert FIELDS to remote format for pull operations."
@@ -721,6 +803,18 @@ QUERY uses Anki's search syntax (e.g., 'tag:vocabulary deck:English')."
               (cl-incf imported))))
         (message "Import complete: %d imported, %d already existed"
                  imported skipped)))))
+
+;;; Utility Commands
+
+(defun org-anki-blocks-sync-set-duplicate-strategy (strategy)
+  "Set the duplicate handling STRATEGY for the current session.
+Valid strategies: ask, replace-with-remote, replace-with-local, skip."
+  (interactive
+   (list (intern (completing-read "Duplicate strategy: "
+                                  '("ask" "replace-with-remote" "replace-with-local" "skip")
+                                  nil t))))
+  (setq org-anki-blocks-sync-duplicate-strategy strategy)
+  (message "Duplicate strategy set to: %s" strategy))
 
 (provide 'org-anki-blocks-sync)
 ;;; org-anki-blocks-sync.el ends here
