@@ -140,14 +140,24 @@ Set to nil to never auto-purge."
       (setq buffer-read-only t)
       (goto-char (point-min)))
     
-    (let ((window (display-buffer buffer '(display-buffer-pop-up-window 
-                                          (window-height . 0.8)
-                                          (window-width . 0.9)))))
+    (let ((window (display-buffer buffer 
+                                   '((display-buffer-reuse-window
+                                      display-buffer-pop-up-window)
+                                     (reusable-frames . nil)
+                                     (inhibit-same-window . t)))))
       (select-window window)
-      (fit-window-to-buffer window nil nil 10 40)
+      ;; Make window take up most of the frame
+      (let ((frame-height (frame-height))
+            (frame-width (frame-width)))
+        (set-window-text-height window (max 20 (- frame-height 10)))
+        (when (> frame-width 100)
+          (window-resize window (- 100 (window-width window)) t)))
+      (goto-char (point-min))
       
       (unwind-protect
           (org-anki-blocks-sync--handle-conflict-input conflict buffer)
+        (when (window-live-p window)
+          (delete-window window))
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
@@ -253,11 +263,18 @@ Set to nil to never auto-purge."
           (insert (propertize "  [s] Skip field   [q] Cancel merge\n" 'face 'shadow))
           (setq buffer-read-only t))
         
-        (let ((window (display-buffer buffer '(display-buffer-pop-up-window 
-                                              (window-height . 0.8)
-                                              (window-width . 0.9)))))
+        (let ((window (display-buffer buffer 
+                                     '((display-buffer-reuse-window
+                                        display-buffer-pop-up-window)
+                                       (reusable-frames . nil)
+                                       (inhibit-same-window . t)))))
           (select-window window)
-          (fit-window-to-buffer window nil nil 10 40)
+          ;; Make window take up most of the frame
+          (let ((frame-height (frame-height))
+                (frame-width (frame-width)))
+            (set-window-text-height window (max 20 (- frame-height 10)))
+            (when (> frame-width 100)
+              (window-resize window (- 100 (window-width window)) t)))
           
           (while (not choice)
             (let ((key (read-key "Choose field value: ")))
@@ -276,9 +293,13 @@ Set to nil to never auto-purge."
                ((eq key ?q) (setq choice 'cancel))))))
         
         (when (eq choice 'cancel)
+          (when (window-live-p window)
+            (delete-window window))
           (when (buffer-live-p buffer) (kill-buffer buffer))
           (error "Merge cancelled by user"))))
     
+    (when (window-live-p window)
+      (delete-window window))
     (when (buffer-live-p buffer) (kill-buffer buffer))
     `(merged . ,(nreverse merged))))
 
@@ -430,11 +451,16 @@ Returns t if successful, nil if failed."
       (insert "\n")
       (setq buffer-read-only t))
     
-    (let ((window (display-buffer buffer '(display-buffer-pop-up-window 
-                                          (window-height . 0.7)
-                                          (window-width . 0.8)))))
+    (let ((window (display-buffer buffer 
+                                   '((display-buffer-reuse-window
+                                      display-buffer-pop-up-window)
+                                     (reusable-frames . nil)
+                                     (inhibit-same-window . t)))))
       (select-window window)
-      (fit-window-to-buffer window nil nil 10 30)
+      ;; Make window a reasonable size for duplicate resolution
+      (let ((frame-height (frame-height)))
+        (set-window-text-height window (max 15 (min 30 (- frame-height 10)))))
+      (goto-char (point-min))
       
       (unwind-protect
           (let ((choice nil))
