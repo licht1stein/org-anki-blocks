@@ -39,6 +39,14 @@
         (setq element (org-element-property :parent element)))
       element)))
 
+(defun org-anki-blocks--find-by-id (id)
+  "Find anki block with given ID."
+  (let ((blocks (org-anki-blocks--find-all)))
+    (cl-find-if (lambda (block)
+                  (equal (org-anki-blocks--get-property block :id)
+                         (if (numberp id) (number-to-string id) id)))
+                blocks)))
+
 ;;; Property Management
 
 (defun org-anki-blocks--get-property (block property)
@@ -94,6 +102,46 @@
           (delete-region (point) match-end)
           (insert (format "#+begin_anki %s"
                          (mapconcat #'identity param-strings " "))))))))
+
+(defun org-anki-blocks--update (block &rest args)
+  "Update BLOCK with properties and/or fields from ARGS.
+ARGS can contain :fields followed by an alist, and other properties."
+  (let ((fields nil)
+        (properties nil))
+    ;; Parse arguments
+    (while args
+      (let ((key (pop args))
+            (value (pop args)))
+        (cond
+         ((eq key :fields)
+          (setq fields value))
+         (t
+          (push value properties)
+          (push key properties)))))
+    
+    ;; Update properties if any
+    (when properties
+      (apply #'org-anki-blocks--update-properties block (nreverse properties)))
+    
+    ;; Update fields if provided
+    (when fields
+      (org-anki-blocks--update-fields block fields))))
+
+(defun org-anki-blocks--update-fields (block fields)
+  "Update the fields content of BLOCK with FIELDS alist."
+  (save-excursion
+    (let ((begin (org-element-property :contents-begin block))
+          (end (org-element-property :contents-end block)))
+      ;; Delete existing field content
+      (delete-region begin end)
+      (goto-char begin)
+      ;; Insert new fields
+      (dolist (field fields)
+        (insert (format "  * %s\n" (car field)))
+        (let ((lines (split-string (cdr field) "\n")))
+          (dolist (line lines)
+            (unless (string-empty-p line)
+              (insert (format "    %s\n" line)))))))
 
 ;;; Field Management
 
@@ -276,6 +324,8 @@ Returns nil if valid, or a string describing the issue."
                 issue)))
     (message "Validation complete: %d/%d blocks have issues"
             invalid (length blocks))))
+
+))
 
 (provide 'org-anki-blocks-core)
 ;;; org-anki-blocks-core.el ends here

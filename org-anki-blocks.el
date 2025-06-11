@@ -145,13 +145,13 @@
    (list (completing-read "Deck to import: " 
                          (org-anki-blocks-connect--deck-names)
                          nil t)))
-  (org-anki-blocks-sync--import-deck deck))
+  (org-anki-blocks-sync-import-deck deck))
 
 ;;;###autoload
 (defun org-anki-blocks-import-query (query)
   "Import cards matching QUERY into current buffer."
   (interactive "sAnki search query: ")
-  (org-anki-blocks-sync--import-query query))
+  (org-anki-blocks-sync-import-query query))
 
 ;;; Status Display
 
@@ -181,15 +181,15 @@
 
 (defvar org-anki-blocks-mode-map
   (make-sparse-keymap)
-  "Keymap for org-anki-mode.")
+  "Keymap for org-anki-blocks-mode.")
 
 ;;;###autoload
 (define-minor-mode org-anki-blocks-mode
   "Minor mode for org-anki integration."
   :lighter " OrgAnkiBlocks"
-  :keymap org-anki-mode-map
-  (if org-anki-mode
-      (when org-anki-sync-on-save
+  :keymap org-anki-blocks-mode-map
+  (if org-anki-blocks-mode
+      (when org-anki-blocks-sync-on-save
         (org-anki-blocks-sync--enable-auto-sync))
     (org-anki-blocks-sync--disable-auto-sync)))
 
@@ -219,12 +219,16 @@
 ;;; Hooks
 
 (defun org-anki-blocks--maybe-enable-mode ()
-  "Enable org-anki-mode if buffer contains anki blocks."
+  "Enable org-anki-blocks-mode if buffer contains anki blocks."
   (when (and (derived-mode-p 'org-mode)
+             (require 'org-anki-blocks-core nil t)
+             (fboundp 'org-anki-blocks--find-all)
              (org-anki-blocks--find-all))
     (org-anki-blocks-mode 1)))
 
-(add-hook 'org-mode-hook #'org-anki--maybe-enable-mode)
+;; Add hook after package is loaded
+(with-eval-after-load 'org
+  (add-hook 'org-mode-hook #'org-anki-blocks--maybe-enable-mode))
 
 (provide 'org-anki-blocks)
 ;;; org-anki-blocks.el ends here
