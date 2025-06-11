@@ -310,15 +310,159 @@ Set to nil to never auto-purge."
         (org-anki-blocks--remove block)))
      ;; Create new note
      ((not id)
-      (let ((new-id (org-anki-blocks-connect--add-note deck model fields tags)))
-        (org-anki-blocks--update block
-                               :id (format "%s" new-id)
-                               :hash (org-anki-blocks-sync--compute-hash fields))))
+      (condition-case err
+          (let ((new-id (org-anki-blocks-connect--add-note deck model fields tags)))
+            (org-anki-blocks--update block
+                                   :id (format "%s" new-id)
+                                   :hash (org-anki-blocks-sync--compute-hash fields)))
+        (error 
+         (if (string-match-p "duplicate" (error-message-string err))
+             (progn
+               (org-anki-blocks-sync--handle-duplicate block deck model fields tags)
+               (message "Block synced successfully after duplicate resolution"))
+           (signal (car err) (cdr err))))))
      ;; Update existing note
      (t
       (org-anki-blocks-connect--update-note id fields)
       (org-anki-blocks--update block
                              :hash (org-anki-blocks-sync--compute-hash fields))))))
+
+;;; Duplicate Handling
+
+(defun org-anki-blocks-sync--handle-duplicate (block deck model fields tags)
+  "Handle duplicate note creation for BLOCK with DECK, MODEL, FIELDS, and TAGS."
+  (let* ((front-field (or (cdr (assoc "Front" fields))
+                         (cdr (assoc "Text" fields))
+                         (cdr (car fields))))
+         (choice (org-anki-blocks-sync--ask-duplicate-resolution front-field)))
+    (cond
+     ((eq choice 'find-existing)
+      (org-anki-blocks-sync--find-and-link-existing block deck fields))
+     ((eq choice 'force-create)
+      (org-anki-blocks-sync--force-create-note block deck model fields tags))
+     ((eq choice 'skip)
+      (message "Skipped creating duplicate note"))
+     (t
+      (error "Invalid duplicate resolution choice")))))
+
+(defun org-anki-blocks-sync--ask-duplicate-resolution (front-content)
+  "Ask user how to resolve duplicate with FRONT-CONTENT."
+  (let ((buffer (get-buffer-create "*Org Anki Duplicate*")))
+    (with-current-buffer buffer
+      (setq buffer-read-only nil)
+      (erase-buffer)
+      (insert (propertize "╔═══════════════════════════════════════════════════════════════════════════════╗\n" 'face 'bold))
+      (insert (propertize "║                          DUPLICATE NOTE DETECTED                             ║\n" 'face 'bold))
+      (insert (propertize "╚═══════════════════════════════════════════════════════════════════════════════╝\n" 'face 'bold))
+      (insert "\n")
+      (insert (propertize "A note with similar content already exists in Anki:\n\n" 'face 'warning))
+      
+      (insert (propertize "Content: " 'face 'bold))
+      (insert (format "%s\n\n" (org-anki-blocks-sync--truncate-content front-content 200)))
+      
+      (insert (propertize "RESOLUTION OPTIONS:\n" 'face 'bold))
+      (insert (propertize "  [f] Find and link to existing note\n" 'face 'success))
+      (insert (propertize "  [c] Force create new note (modify content slightly)\n" 'face 'warning))
+      (insert (propertize "  [s] Skip this note\n" 'face 'shadow))
+      (insert (propertize "  [q] Quit sync\n" 'face 'error))
+      (insert "\n")
+      (setq buffer-read-only t))
+    
+    (let ((window (display-buffer buffer '(display-buffer-pop-up-window . nil))))
+      (select-window window)
+      (fit-window-to-buffer window)
+      
+      (unwind-protect
+          (let ((choice nil))
+            (while (not choice)
+              (let ((key (read-key "Choose duplicate resolution: ")))
+                (cond
+                 ((eq key ?f) (setq choice 'find-existing))
+                 ((eq key ?c) (setq choice 'force-create))
+                 ((eq key ?s) (setq choice 'skip))
+                 ((eq key ?q) (error "Sync cancelled by user"))
+                 (t (message "Invalid choice! Press [f], [c], [s], or [q]")
+                    (sit-for 1)))))
+            choice)
+        ;; Clean up window and buffer
+        (when (window-live-p window)
+          (delete-window window))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(defun org-anki-blocks-sync--truncate-content (content max-length)
+  "Truncate CONTENT to MAX-LENGTH characters for display."
+  (if (> (length content) max-length)
+      (concat (substring content 0 (- max-length 3)) "...")
+    content))
+
+(defun org-anki-blocks-sync--find-and-link-existing (block deck fields)
+  "Find existing note in DECK with similar FIELDS and link BLOCK to it."
+  (let* ((search-term (or (cdr (assoc "Front" fields))
+                         (cdr (assoc "Text" fields))
+                         (cdr (car fields))))
+         ;; Search for notes with similar content
+         (query (format "deck:\"%s\" \"%s\"" deck (substring search-term 0 (min 50 (length search-term)))))
+         (note-ids (org-anki-blocks-connect--find-notes query)))
+    (if note-ids
+        (let* ((notes-info (org-anki-blocks-connect--notes-info note-ids))
+               (matching-note (org-anki-blocks-sync--find-best-match fields notes-info)))
+          (if matching-note
+              (let ((note-id (alist-get 'noteId matching-note)))
+                (org-anki-blocks--update block 
+                                       :id (format "%s" note-id)
+                                       :hash (org-anki-blocks-sync--compute-hash fields))
+                (message "Linked to existing note ID: %s" note-id))
+            (message "Could not find exact match among %d similar notes" (length note-ids))))
+      (message "No similar notes found in deck %s" deck))))
+
+(defun org-anki-blocks-sync--find-best-match (fields notes-info)
+  "Find the best matching note from NOTES-INFO for FIELDS."
+  (let ((best-match nil)
+        (best-score 0))
+    (dolist (note-info notes-info)
+      (let* ((remote-fields (org-anki-blocks-sync--extract-fields note-info))
+             (score (org-anki-blocks-sync--compute-similarity fields remote-fields)))
+        (when (> score best-score)
+          (setq best-score score
+                best-match note-info))))
+    best-match))
+
+(defun org-anki-blocks-sync--compute-similarity (fields1 fields2)
+  "Compute similarity score between FIELDS1 and FIELDS2."
+  (let ((total-fields (length fields1))
+        (matching-fields 0))
+    (dolist (field fields1)
+      (let* ((field-name (car field))
+             (field-value (cdr field))
+             (remote-value (cdr (assoc field-name fields2))))
+        (when (and remote-value 
+                   (string= (string-trim field-value) (string-trim remote-value)))
+          (setq matching-fields (1+ matching-fields)))))
+    (if (> total-fields 0)
+        (/ (float matching-fields) total-fields)
+      0)))
+
+(defun org-anki-blocks-sync--force-create-note (block deck model fields tags)
+  "Force create a note for BLOCK by modifying FIELDS to avoid duplicates."
+  (let* ((modified-fields (copy-sequence fields))
+         (front-field (or (assoc "Front" modified-fields)
+                         (assoc "Text" modified-fields)
+                         (car modified-fields))))
+    (when front-field
+      ;; Add a small suffix to make it unique
+      (setcdr front-field (concat (cdr front-field) " (variant)")))
+    
+    (condition-case err
+        (let ((new-id (org-anki-blocks-connect--add-note deck model modified-fields tags)))
+          (org-anki-blocks--update block
+                                 :id (format "%s" new-id)
+                                 :fields modified-fields
+                                 :hash (org-anki-blocks-sync--compute-hash modified-fields))
+          (message "Created note with modified content to avoid duplicate"))
+      (error
+       (error "Failed to create note even with modified content: %s" 
+              (error-message-string err))))))
 
 ;;; Main Sync Functions
 

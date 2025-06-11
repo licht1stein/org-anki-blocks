@@ -128,8 +128,8 @@ ARGS can contain :fields followed by an alist, and other properties."
          ((eq key :fields)
           (setq fields value))
          (t
-          (push value properties)
-          (push key properties)))))
+          (push key properties)
+          (push value properties)))))
     
     ;; Update properties if any
     (when properties
