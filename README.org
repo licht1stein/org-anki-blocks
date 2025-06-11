@@ -1,0 +1,386 @@
+#+TITLE: org-anki-blocks - Seamless Anki Integration for Org-mode
+#+AUTHOR: Myke Bilyanskyy
+
+* Overview
+
+org-anki-blocks provides seamless 2-way synchronization between org-mode and Anki flashcards. Create, edit, and manage your Anki cards directly from org-mode with full sync capabilities including conflict resolution and deletion tracking.
+
+** Features
+
+- 📝 Create Anki cards using org-mode special blocks
+- 🔄 Full 2-way synchronization with conflict resolution
+- 🗑️ Safe deletion tracking with recovery options
+- 📦 Bulk operations for efficient workflows
+- 🚀 Zero external dependencies (only requires AnkiConnect)
+- 🎯 Smart change detection to minimize syncs
+- 🔍 Interactive conflict resolution
+- ⚡ Auto-sync on save (optional)
+
+* Installation
+
+** Prerequisites
+
+1. Emacs 29.1 or later (for bind-keys and use-package built-in support)
+
+2. Install and configure [[https://ankiweb.net/shared/info/2055492159][AnkiConnect]] in Anki:
+   - Open Anki
+   - Tools → Add-ons → Get Add-ons...
+   - Enter code: =2055492159=
+   - Click OK to install
+   - Restart Anki
+   
+   AnkiConnect enables API access to Anki and runs a local server on port 8765.
+   No additional configuration is required for basic usage.
+
+3. Ensure Anki is running (AnkiConnect runs on http://localhost:8765)
+
+** Installing org-anki-blocks
+
+*** Basic Setup
+
+Add to your Emacs configuration:
+
+#+begin_src elisp
+(add-to-list 'load-path "~/path/to/org-anki-blocks/")
+(require 'org-anki-blocks)
+
+;; Optional: Set default deck
+(setq org-anki-blocks-default-deck "Default")
+
+;; Optional: Enable auto-sync on save
+(setq org-anki-blocks-sync-on-save t)
+#+end_src
+
+*** With use-package (Recommended)
+
+#+begin_src elisp
+;; Requires Emacs 29.1+ (bind-keys and use-package included)
+(use-package org-anki-blocks
+  :load-path "~/path/to/org-anki-blocks/"
+  :after org
+  :hook (org-mode . (lambda ()
+                      (when (org-anki-blocks--find-all)
+                        (org-anki-blocks-mode 1))))
+  :custom
+  (org-anki-blocks-default-deck "Default")
+  (org-anki-blocks-sync-on-save nil)
+  :bind (:map org-anki-blocks-mode-map
+              ("C-c a s" . org-anki-blocks-sync-block)
+              ("C-c a S" . org-anki-blocks-sync-buffer)
+              ("C-c a p" . org-anki-blocks-push)
+              ("C-c a P" . org-anki-blocks-pull)
+              ("C-c a i" . org-anki-blocks-insert)
+              ("C-c a d" . org-anki-blocks-delete)
+              ("C-c a b" . org-anki-blocks-browse)
+              ("C-c a v" . org-anki-blocks-validate-buffer)
+              ("C-c a I d" . org-anki-blocks-import-deck)
+              ("C-c a I q" . org-anki-blocks-import-query)
+              ("C-c a ?" . org-anki-blocks-status)))
+#+end_src
+
+*** Custom Keybinding Prefix
+
+To use a different prefix (e.g., =C-c n= for "notes"):
+
+#+begin_src elisp
+;; Requires Emacs 29.1+ (bind-keys and use-package included)
+(use-package org-anki-blocks
+  :load-path "~/path/to/org-anki-blocks/"
+  :after org
+  :config
+  ;; Use bind-keys with custom prefix
+  (bind-keys :map org-anki-blocks-mode-map
+             :prefix "C-c n"  ; Your custom prefix here
+             :prefix-map org-anki-blocks-prefix-map
+             ("s" . org-anki-blocks-sync-block)
+             ("S" . org-anki-blocks-sync-buffer)
+             ("p" . org-anki-blocks-push)
+             ("P" . org-anki-blocks-pull)
+             ("i" . org-anki-blocks-insert)
+             ("d" . org-anki-blocks-delete)
+             ("b" . org-anki-blocks-browse)
+             ("v" . org-anki-blocks-validate-buffer)
+             ("I d" . org-anki-blocks-import-deck)
+             ("I q" . org-anki-blocks-import-query)
+             ("?" . org-anki-blocks-status)))
+#+end_src
+
+* Usage
+
+** Creating Cards
+
+Use =C-c a i= or =M-x org-anki-blocks-insert= to insert a new card:
+
+#+begin_src org
+#+begin_anki :deck "My Deck" :type Basic
+  * Front
+    What is the capital of France?
+  * Back
+    Paris
+#+end_anki
+#+end_src
+
+** Card Types
+
+*** Basic
+#+begin_src org
+#+begin_anki :deck "Geography" :type Basic
+  * Front
+    What is the capital of France?
+  * Back
+    Paris
+#+end_anki
+#+end_src
+
+*** Basic (and reversed card)
+#+begin_src org
+#+begin_anki :deck "Language" :type "Basic (and reversed card)"
+  * Front
+    Hello
+  * Back
+    Bonjour
+#+end_anki
+#+end_src
+
+*** Cloze
+#+begin_src org
+#+begin_anki :deck "Science" :type Cloze
+  * Text
+    The {{c1::Sun}} is a {{c2::star}} at the center of our {{c3::solar system}}.
+  * Extra
+    Remember: It's about 93 million miles from Earth.
+#+end_anki
+#+end_src
+
+** Syncing
+
+*** Manual Sync
+- =C-c a s= - Sync current block
+- =C-c a S= - Sync entire buffer (2-way sync)
+- =C-c a p= - Push local changes to Anki
+- =C-c a P= - Pull changes for existing cards only
+
+*** Auto-sync
+Enable automatic sync on save:
+#+begin_src elisp
+(setq org-anki-blocks-sync-on-save t)
+#+end_src
+
+*** Important: Pull vs Import
+- **Pull** (=C-c a P=): Only updates cards that already exist in your org file
+- **Import** (=C-c a I d=): Imports ALL cards from a deck, creating new blocks
+
+** Importing Cards from Anki
+
+*** Import Entire Deck
+Import all cards from a specific deck:
+#+begin_src elisp
+M-x org-anki-blocks-import-deck
+;; or
+C-c a I d
+#+end_src
+
+*** Import by Query
+Import cards matching an Anki search query:
+#+begin_src elisp
+M-x org-anki-blocks-import-query
+;; or 
+C-c a I q
+#+end_src
+
+Query examples:
+- =deck:MyDeck= - All cards from MyDeck
+- =tag:vocabulary= - Cards with vocabulary tag
+- =added:7= - Cards added in last 7 days
+- =deck:English tag:verb= - English deck cards with verb tag
+
+** Managing Cards
+
+*** Editing
+Simply edit the content within the block and sync:
+
+#+begin_src org
+#+begin_anki :deck "My Deck" :type Basic :id 1234567890
+  * Front
+    Updated question?
+  * Back
+    Updated answer!
+#+end_anki
+#+end_src
+
+*** Deleting
+Mark a card for deletion with =C-c a d=:
+
+#+begin_src org
+#+begin_anki :deck "My Deck" :type Basic :id 1234567890 :deleted t
+  * Front
+    [DELETED]
+  * Back
+    [DELETED]
+#+end_anki
+#+end_src
+
+The card will be deleted from Anki on next sync.
+
+** Conflict Resolution
+
+When both local and remote versions have changed, org-anki-blocks will prompt you:
+
+1. **(l)ocal** - Keep your org-mode version
+2. **(r)emote** - Keep the Anki version
+3. **(m)erge** - Manually merge changes
+4. **(s)kip** - Skip this card
+
+Configure automatic resolution:
+#+begin_src elisp
+;; Options: 'ask, 'local-wins, 'remote-wins, 'newer-wins
+(setq org-anki-blocks-sync-conflict-strategy 'ask)
+#+end_src
+
+* Key Bindings
+
+org-anki-blocks-mode provides these keybindings:
+
+| Key         | Command                   | Description                  |
+|-------------+---------------------------+------------------------------|
+| =C-c a s=   | =org-anki-blocks-sync-block=     | Sync current block           |
+| =C-c a S=   | =org-anki-blocks-sync-buffer=    | Sync entire buffer           |
+| =C-c a p=   | =org-anki-blocks-push=           | Push changes to Anki         |
+| =C-c a P=   | =org-anki-blocks-pull=           | Pull changes (existing only) |
+| =C-c a i=   | =org-anki-blocks-insert=   | Insert new card              |
+| =C-c a d=   | =org-anki-blocks-delete=   | Mark card for deletion       |
+| =C-c a b=   | =org-anki-blocks-browse=         | Browse cards in buffer       |
+| =C-c a v=   | =org-anki-blocks-validate-buffer=| Validate all cards           |
+| =C-c a I d= | =org-anki-blocks-import-deck=    | Import entire deck           |
+| =C-c a I q= | =org-anki-blocks-import-query=   | Import by search query       |
+| =C-c a ?=   | =org-anki-blocks-status=         | Show sync status             |
+
+* Block Properties
+
+** Required Properties
+- =:deck= - Target Anki deck
+- =:type= - Note type (Basic, Cloze, etc.)
+
+** Optional Properties
+- =:id= - Anki note ID (auto-generated on first sync)
+- =:tags= - Comma-separated tags
+- =:hash= - Content hash for change detection (auto-managed)
+- =:modified= - Local modification flag (auto-managed)
+- =:deleted= - Deletion flag
+- =:delete-time= - Deletion timestamp
+
+* Configuration
+
+** Variables
+
+#+begin_src elisp
+;; Default deck for new cards
+(setq org-anki-blocks-default-deck "Default")
+
+;; Default note type
+(setq org-anki-blocks-default-note-type "Basic")
+
+;; Auto-sync on save
+(setq org-anki-sync-on-save nil)
+
+;; Confirm before deletion
+(setq org-anki-blocks-confirm-deletion t)
+
+;; Conflict resolution strategy
+(setq org-anki-blocks-sync-conflict-strategy 'ask)
+
+;; Days before purging deleted cards
+(setq org-anki-blocks-sync-delete-after-days 30)
+
+;; AnkiConnect URL
+(setq org-anki-blocks-connect-url "http://localhost:8765")
+
+;; Request timeout
+(setq org-anki-blocks-connect-timeout 10)
+#+end_src
+
+* Troubleshooting
+
+** Connection Issues
+
+Test the connection:
+#+begin_src elisp
+M-x org-anki-blocks-test-connection
+#+end_src
+
+Ensure:
+1. Anki is running
+2. AnkiConnect is installed
+3. No firewall blocking port 8765
+
+** Sync Issues
+
+Check card validation:
+#+begin_src elisp
+M-x org-anki-blocks-validate-buffer
+#+end_src
+
+View sync status:
+#+begin_src elisp
+M-x org-anki-blocks-status
+#+end_src
+
+** Common Problems
+
+*** "AnkiConnect error: collection is not available"
+→ Open Anki and ensure a profile is loaded
+
+*** Cards not syncing
+→ Check that blocks have required =:deck= and =:type= properties
+
+*** Duplicate cards
+→ Ensure each card has a unique =:id= after first sync
+
+* Advanced Usage
+
+** Batch Operations
+
+Sync multiple files:
+#+begin_src elisp
+(dolist (file (directory-files "~/anki-notes/" t "\\.org$"))
+  (with-current-buffer (find-file-noselect file)
+    (org-anki-blocks-sync-buffer)))
+#+end_src
+
+** Custom Card Types
+
+Create cards with custom note types:
+#+begin_src org
+#+begin_anki :deck "Advanced" :type "My Custom Type"
+  * Field1
+    Content
+  * Field2
+    Content
+  * MySpecialField
+    Content
+#+end_anki
+#+end_src
+
+** Programmatic Card Creation
+
+#+begin_src elisp
+(org-anki-blocks--create
+ :deck "Programming"
+ :type "Basic"
+ :fields '(("Front" . "What is a monad?")
+           ("Back" . "A monad is a monoid in the category of endofunctors"))
+ :tags '("functional" "theory"))
+#+end_src
+
+* Contributing
+
+Contributions welcome! The codebase is modular:
+
+- =org-anki-blocks-connect.el= - AnkiConnect API client
+- =org-anki-blocks-core.el= - Block parsing/management  
+- =org-anki-blocks-sync.el= - Sync engine
+- =org-anki-blocks.el= - Main interface
+
+* License
+
+This project is released under the same license as Emacs (GPL v3+).
