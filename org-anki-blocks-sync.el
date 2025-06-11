@@ -15,6 +15,7 @@
 (require 'org-anki-blocks-connect)
 (require 'cl-lib)
 (require 'subr-x)
+(require 'seq)
 
 ;;; Customization
 
@@ -57,13 +58,14 @@ Set to nil to never auto-purge."
 ;;; Hash Computation
 
 (defun org-anki-blocks-sync--compute-hash (fields)
-  "Compute a hash of FIELDS content for change detection."
-  (secure-hash 'sha256
-               (mapconcat (lambda (field)
-                           (format "%s:%s" (car field) (cdr field)))
-                         (sort (copy-sequence fields)
-                               (lambda (a b) (string< (car a) (car b))))
-                         "\n")))
+  "Compute a short hash of FIELDS content for change detection."
+  (let ((content (mapconcat (lambda (field)
+                             (format "%s:%s" (car field) (cdr field)))
+                           (sort (copy-sequence fields)
+                                 (lambda (a b) (string< (car a) (car b))))
+                           "\n")))
+    ;; Use first 8 characters of SHA256 for a short, readable hash
+    (substring (secure-hash 'sha256 content) 0 8)))
 
 ;;; Change Detection
 
@@ -113,42 +115,151 @@ Set to nil to never auto-purge."
      (t (error "Unknown conflict strategy: %s" strategy)))))
 
 (defun org-anki-blocks-sync--ask-user-resolution (conflict)
-  "Interactively ask user to resolve CONFLICT."
+  "Interactively ask user to resolve CONFLICT with improved UI."
   (let* ((local (alist-get 'local conflict))
          (remote (alist-get 'remote conflict))
          (id (alist-get 'id conflict))
-         (buffer (get-buffer-create "*Org Anki Conflict*")))
+         (buffer (get-buffer-create "*Org Anki Conflict Resolution*")))
     (with-current-buffer buffer
+      (setq buffer-read-only nil)
       (erase-buffer)
-      (insert (format "Conflict for note ID: %s\n\n" id))
-      (insert "=== LOCAL VERSION ===\n")
-      (dolist (field local)
-        (insert (format "%s: %s\n" (car field) (cdr field))))
-      (insert "\n=== REMOTE VERSION ===\n")
-      (dolist (field remote)
-        (insert (format "%s: %s\n" (car field) (cdr field))))
-      (insert "\n\nChoose: (l)ocal, (r)emote, (m)erge, (s)kip: "))
-    (pop-to-buffer buffer)
-    (let ((choice (read-char)))
-      (kill-buffer buffer)
-      (cond
-       ((eq choice ?l) 'local)
-       ((eq choice ?r) 'remote)
-       ((eq choice ?m) (org-anki-blocks-sync--merge-interactive conflict))
-       ((eq choice ?s) 'skip)
-       (t (error "Invalid choice"))))))
+      (org-anki-blocks-sync--setup-conflict-buffer local remote id)
+      (setq buffer-read-only t)
+      (goto-char (point-min)))
+    
+    (let ((window (display-buffer buffer '(display-buffer-pop-up-window . nil))))
+      (select-window window)
+      (fit-window-to-buffer window)
+      
+      (unwind-protect
+          (org-anki-blocks-sync--handle-conflict-input conflict buffer)
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(defun org-anki-blocks-sync--setup-conflict-buffer (local remote id)
+  "Setup the conflict resolution buffer with LOCAL and REMOTE fields and ID."
+  (insert (propertize "╔═══════════════════════════════════════════════════════════════════════════════╗\n" 'face 'bold))
+  (insert (propertize "║                           ANKI SYNC CONFLICT                                 ║\n" 'face 'bold))
+  (insert (propertize "╚═══════════════════════════════════════════════════════════════════════════════╝\n" 'face 'bold))
+  (insert "\n")
+  (insert (propertize (format "Note ID: %s\n\n" id) 'face 'italic))
+  
+  ;; Show field-by-field comparison
+  (let ((all-fields (delete-dups (append (mapcar #'car local) (mapcar #'car remote)))))
+    (dolist (field-name all-fields)
+      (let ((local-value (cdr (assoc field-name local)))
+            (remote-value (cdr (assoc field-name remote))))
+        (insert (propertize (format "Field: %s\n" field-name) 'face 'bold))
+        (insert (propertize "┌─ LOCAL ──────────────────────────────────────────────────────────────────┐\n" 'face 'diff-header))
+        (if local-value
+            (insert (propertize (format "│ %s\n" (org-anki-blocks-sync--format-field-content local-value)) 
+                               'face (if (string= local-value remote-value) 'default 'diff-removed)))
+          (insert (propertize "│ [MISSING]\n" 'face 'diff-removed)))
+        (insert (propertize "├─ REMOTE ────────────────────────────────────────────────────────────────┤\n" 'face 'diff-header))
+        (if remote-value
+            (insert (propertize (format "│ %s\n" (org-anki-blocks-sync--format-field-content remote-value))
+                               'face (if (string= local-value remote-value) 'default 'diff-added)))
+          (insert (propertize "│ [MISSING]\n" 'face 'diff-added)))
+        (insert (propertize "└──────────────────────────────────────────────────────────────────────────┘\n" 'face 'diff-header))
+        (insert "\n"))))
+  
+  (insert (propertize "═══════════════════════════════════════════════════════════════════════════════\n" 'face 'bold))
+  (insert (propertize "RESOLUTION OPTIONS:\n" 'face 'bold))
+  (insert (propertize "  [l] Use LOCAL version    " 'face 'success) 
+          (propertize "[r] Use REMOTE version\n" 'face 'warning))
+  (insert (propertize "  [m] Merge interactively  " 'face 'info) 
+          (propertize "[s] Skip this conflict\n" 'face 'shadow))
+  (insert (propertize "  [q] Quit conflict resolution\n" 'face 'error))
+  (insert (propertize "═══════════════════════════════════════════════════════════════════════════════\n" 'face 'bold))
+  (insert "\nPress a key to choose resolution..."))
+
+(defun org-anki-blocks-sync--format-field-content (content)
+  "Format CONTENT for display, handling long text and newlines."
+  (let ((lines (split-string content "\n")))
+    (if (> (length lines) 3)
+        (concat (mapconcat #'identity (seq-take lines 2) "\n│ ") 
+                (format "\n│ ... (%d more lines)" (- (length lines) 2)))
+      (mapconcat #'identity lines "\n│ "))))
+
+(defun org-anki-blocks-sync--handle-conflict-input (conflict buffer)
+  "Handle user input for CONFLICT resolution in BUFFER."
+  (let ((choice nil)
+        (message-displayed nil))
+    (while (not choice)
+      (let ((key (read-key (if message-displayed 
+                              "Invalid choice! Press [l]ocal, [r]emote, [m]erge, [s]kip, or [q]uit: "
+                            "Choose resolution: "))))
+        (cond
+         ((eq key ?l) (setq choice 'local))
+         ((eq key ?r) (setq choice 'remote))
+         ((eq key ?m) (setq choice (org-anki-blocks-sync--merge-interactive conflict)))
+         ((eq key ?s) (setq choice 'skip))
+         ((eq key ?q) (setq choice 'quit))
+         (t (setq message-displayed t)))))
+    choice))
 
 (defun org-anki-blocks-sync--merge-interactive (conflict)
-  "Interactively merge CONFLICT."
-  ;; Simple implementation - could be enhanced with ediff
+  "Interactively merge CONFLICT with field-by-field selection."
   (let* ((local (alist-get 'local conflict))
          (remote (alist-get 'remote conflict))
-         (merged (copy-sequence local)))
-    (dolist (field remote)
-      (when (yes-or-no-p (format "Use remote value for %s? " (car field)))
-        (setf (alist-get (car field) merged nil nil #'string=)
-              (cdr field))))
-    `(merged . ,merged)))
+         (all-fields (delete-dups (append (mapcar #'car local) (mapcar #'car remote))))
+         (merged nil)
+         (buffer (get-buffer-create "*Org Anki Field Merge*")))
+    
+    (with-current-buffer buffer
+      (setq buffer-read-only nil)
+      (erase-buffer))
+    
+    (dolist (field-name all-fields)
+      (let* ((local-value (cdr (assoc field-name local)))
+             (remote-value (cdr (assoc field-name remote)))
+             (choice nil))
+        
+        (with-current-buffer buffer
+          (erase-buffer)
+          (insert (propertize "╔═══════════════════════════════════════════════════════════════════════════════╗\n" 'face 'bold))
+          (insert (propertize "║                            FIELD MERGE                                       ║\n" 'face 'bold))
+          (insert (propertize "╚═══════════════════════════════════════════════════════════════════════════════╝\n" 'face 'bold))
+          (insert "\n")
+          (insert (propertize (format "Field: %s\n\n" field-name) 'face 'bold))
+          
+          (insert (propertize "LOCAL VERSION:\n" 'face 'diff-removed))
+          (insert (format "%s\n\n" (or local-value "[MISSING]")))
+          
+          (insert (propertize "REMOTE VERSION:\n" 'face 'diff-added))
+          (insert (format "%s\n\n" (or remote-value "[MISSING]")))
+          
+          (insert (propertize "Choose version:\n" 'face 'bold))
+          (insert (propertize "  [l] Use LOCAL    [r] Use REMOTE    [e] Edit manually\n" 'face 'info))
+          (insert (propertize "  [s] Skip field   [q] Cancel merge\n" 'face 'shadow))
+          (setq buffer-read-only t))
+        
+        (let ((window (display-buffer buffer '(display-buffer-pop-up-window . nil))))
+          (select-window window)
+          (fit-window-to-buffer window)
+          
+          (while (not choice)
+            (let ((key (read-key "Choose field value: ")))
+              (cond
+               ((eq key ?l) (when local-value
+                              (push (cons field-name local-value) merged)
+                              (setq choice 'done)))
+               ((eq key ?r) (when remote-value
+                              (push (cons field-name remote-value) merged)
+                              (setq choice 'done)))
+               ((eq key ?e) (let ((custom-value (read-string (format "Enter value for %s: " field-name)
+                                                            (or local-value remote-value ""))))
+                              (push (cons field-name custom-value) merged)
+                              (setq choice 'done)))
+               ((eq key ?s) (setq choice 'skip))
+               ((eq key ?q) (setq choice 'cancel))))))
+        
+        (when (eq choice 'cancel)
+          (when (buffer-live-p buffer) (kill-buffer buffer))
+          (error "Merge cancelled by user"))))
+    
+    (when (buffer-live-p buffer) (kill-buffer buffer))
+    `(merged . ,(nreverse merged))))
 
 ;;; Sync Operations
 
@@ -184,6 +295,13 @@ Set to nil to never auto-purge."
          (fields (org-anki-blocks--get-fields block))
          (tags (org-anki-blocks--get-property block :tags))
          (deleted (org-anki-blocks--get-property block :deleted)))
+    ;; Validate required properties
+    (unless deck
+      (error "Missing deck property in block"))
+    (unless model
+      (error "Missing type property in block"))
+    (unless fields
+      (error "No fields found in block"))
     (cond
      ;; Handle deletion
      (deleted
@@ -194,9 +312,7 @@ Set to nil to never auto-purge."
      ((not id)
       (let ((new-id (org-anki-blocks-connect--add-note deck model fields tags)))
         (org-anki-blocks--update block
-                               :id (if (numberp new-id) 
-                                       (number-to-string new-id)
-                                     new-id)
+                               :id (format "%s" new-id)
                                :hash (org-anki-blocks-sync--compute-hash fields))))
      ;; Update existing note
      (t
@@ -283,23 +399,27 @@ If DECK is specified, only sync cards from that deck."
 
 (defun org-anki-blocks-sync--process-conflicts (conflicts)
   "Process list of CONFLICTS."
-  (dolist (conflict conflicts)
-    (let ((resolution (org-anki-blocks-sync--resolve-conflict conflict)))
-      (cond
-       ((eq resolution 'local)
-        (org-anki-blocks-sync--push-note (alist-get 'block conflict)))
-       ((eq resolution 'remote)
-        (org-anki-blocks-sync--pull-note
-         `((noteId . ,(alist-get 'id conflict))
-           (fields . ,(org-anki-blocks-sync--fields-to-remote-format
-                      (alist-get 'remote conflict))))))
-       ((and (consp resolution) (eq (car resolution) 'merged))
-        (let ((block (alist-get 'block conflict))
-              (merged-fields (cdr resolution)))
-          (org-anki-blocks--update block :fields merged-fields)
-          (org-anki-blocks-sync--push-note block)))
-       ((eq resolution 'skip)
-        (message "Skipped conflict for note %s" (alist-get 'id conflict)))))))
+  (catch 'quit-conflicts
+    (dolist (conflict conflicts)
+      (let ((resolution (org-anki-blocks-sync--resolve-conflict conflict)))
+        (cond
+         ((eq resolution 'local)
+          (org-anki-blocks-sync--push-note (alist-get 'block conflict)))
+         ((eq resolution 'remote)
+          (org-anki-blocks-sync--pull-note
+           `((noteId . ,(alist-get 'id conflict))
+             (fields . ,(org-anki-blocks-sync--fields-to-remote-format
+                        (alist-get 'remote conflict))))))
+         ((and (consp resolution) (eq (car resolution) 'merged))
+          (let ((block (alist-get 'block conflict))
+                (merged-fields (cdr resolution)))
+            (org-anki-blocks--update block :fields merged-fields)
+            (org-anki-blocks-sync--push-note block)))
+         ((eq resolution 'skip)
+          (message "Skipped conflict for note %s" (alist-get 'id conflict)))
+         ((eq resolution 'quit)
+          (message "Conflict resolution cancelled by user")
+          (throw 'quit-conflicts nil)))))))
 
 (defun org-anki-blocks-sync--fields-to-remote-format (fields)
   "Convert FIELDS to remote format for pull operations."

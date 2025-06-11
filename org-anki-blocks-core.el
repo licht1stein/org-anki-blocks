@@ -80,7 +80,7 @@
 
 (defun org-anki-blocks--update-property (block property value)
   "Update PROPERTY with VALUE in anki BLOCK header."
-  (org-anki-blocks--update-properties block (list property value)))
+  (org-anki-blocks--update-properties block property value))
 
 (defun org-anki-blocks--update-properties (block &rest properties)
   "Update multiple PROPERTIES in anki BLOCK header."
@@ -88,20 +88,32 @@
     (goto-char (org-element-property :begin block))
     (when (looking-at "^#\\+begin_anki\\s-*\\(.*\\)$")
       (let* ((match-end (match-end 0))
-             (current-params (org-anki-blocks--get-all-properties block))
-             (new-params current-params))
-        ;; Update properties
-        (cl-loop for (key value) on properties by #'cddr
-                 do (setq new-params (plist-put new-params key value)))
+             (current-params (or (org-anki-blocks--get-all-properties block) nil))
+             (new-params (copy-sequence current-params)))
+        
+        ;; Update properties safely by merging the new properties
+        (while properties
+          (let ((key (pop properties))
+                (value (pop properties)))
+            (when (and key value)
+              (setq new-params (plist-put new-params key value)))))
+        
         ;; Format new parameter string
-        (let ((param-strings
-               (cl-loop for (key value) on new-params by #'cddr
-                        when value
-                        collect (format "%s %s" (symbol-name key) value))))
+        (let ((param-strings nil)
+              (plist new-params))
+          ;; Process plist into formatted strings
+          (while plist
+            (let ((key (pop plist))
+                  (value (pop plist)))
+              (when (and key value)
+                (push (format "%s %s" 
+                            (if (symbolp key) (symbol-name key) key)
+                            value) param-strings))))
+          
           ;; Delete old line and insert new one
           (delete-region (point) match-end)
           (insert (format "#+begin_anki %s"
-                         (mapconcat #'identity param-strings " "))))))))
+                         (mapconcat #'identity (nreverse param-strings) " "))))))))
 
 (defun org-anki-blocks--update (block &rest args)
   "Update BLOCK with properties and/or fields from ARGS.

@@ -41,11 +41,13 @@
   "Send request to AnkiConnect with ACTION and optional PARAMS.
 Returns the result field from the response, or signals an error."
   (let ((url-request-method "POST")
-        (url-request-extra-headers '(("Content-Type" . "application/json")))
-        (url-request-data (json-encode
-                          `((action . ,action)
-                            (version . 6)
-                            ,@(when params `((params . ,params))))))
+        (url-request-extra-headers '(("Content-Type" . "application/json; charset=utf-8")))
+        (url-request-data (encode-coding-string
+                          (json-encode
+                           `((action . ,action)
+                             (version . 6)
+                             ,@(when params `((params . ,params)))))
+                          'utf-8))
         (json-object-type 'alist)
         (json-array-type 'list)
         (json-key-type 'symbol)
@@ -89,7 +91,10 @@ Returns the new note ID."
   (let ((note `((deckName . ,deck)
                 (modelName . ,model)
                 (fields . ,(map-into fields 'hash-table))
-                ,@(when tags `((tags . ,tags))))))
+                ,@(when (and tags (not (string-empty-p tags)))
+                    `((tags . ,(if (stringp tags)
+                                   (split-string tags "," t " ")
+                                 tags)))))))
     (org-anki-blocks-connect--request "addNote" `((note . ,note)))))
 
 (defun org-anki-blocks-connect--update-note (id fields)
