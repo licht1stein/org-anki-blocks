@@ -79,7 +79,7 @@
 (defun org-anki-blocks-sync-buffer ()
   "Sync all anki blocks in current buffer."
   (interactive)
-  (org-anki-blocks-sync--all))
+  (org-anki-blocks-sync-all))
 
 ;;;###autoload
 (defun org-anki-blocks-pull ()

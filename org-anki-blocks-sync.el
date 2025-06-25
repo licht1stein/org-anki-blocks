@@ -68,6 +68,9 @@ Set to nil to never auto-purge."
 (defvar org-anki-blocks-sync--conflicts nil
   "List of conflicts found during sync.")
 
+(defvar org-anki-blocks-sync--conflict-resolution-in-progress nil
+  "Non-nil when conflict resolution is in progress.")
+
 ;;; Hash Computation
 
 (defun org-anki-blocks-sync--compute-hash (fields)
@@ -129,10 +132,22 @@ Set to nil to never auto-purge."
 
 (defun org-anki-blocks-sync--ask-user-resolution (conflict)
   "Interactively ask user to resolve CONFLICT with improved UI."
+  ;; Ensure only one conflict resolution at a time
+  (when org-anki-blocks-sync--conflict-resolution-in-progress
+    (error "Another conflict resolution is already in progress"))
+  
   (let* ((local (alist-get 'local conflict))
          (remote (alist-get 'remote conflict))
          (id (alist-get 'id conflict))
-         (buffer (get-buffer-create "*Org Anki Conflict Resolution*")))
+         (buffer (get-buffer-create "*Org Anki Conflict Resolution*"))
+         (org-anki-blocks-sync--conflict-resolution-in-progress t))
+    
+    ;; Kill any existing conflict buffers first
+    (dolist (buf (buffer-list))
+      (when (string-match-p "\\*Org Anki.*\\*" (buffer-name buf))
+        (unless (eq buf buffer)
+          (kill-buffer buf))))
+    
     (with-current-buffer buffer
       (setq buffer-read-only nil)
       (erase-buffer)
@@ -140,26 +155,29 @@ Set to nil to never auto-purge."
       (setq buffer-read-only t)
       (goto-char (point-min)))
     
-    (let ((window (display-buffer buffer 
-                                   '((display-buffer-reuse-window
-                                      display-buffer-pop-up-window)
-                                     (reusable-frames . nil)
-                                     (inhibit-same-window . t)))))
-      (select-window window)
-      ;; Make window take up most of the frame
-      (let ((frame-height (frame-height))
-            (frame-width (frame-width)))
-        (set-window-text-height window (max 20 (- frame-height 10)))
-        (when (> frame-width 100)
-          (window-resize window (- 100 (window-width window)) t)))
-      (goto-char (point-min))
-      
-      (unwind-protect
-          (org-anki-blocks-sync--handle-conflict-input conflict buffer)
-        (when (window-live-p window)
-          (delete-window window))
-        (when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
+    (unwind-protect
+        (let ((window (display-buffer buffer 
+                                     '((display-buffer-reuse-window
+                                        display-buffer-pop-up-window)
+                                       (reusable-frames . nil)
+                                       (inhibit-same-window . t)))))
+          (select-window window)
+          ;; Make window take up most of the frame
+          (let ((frame-height (frame-height))
+                (frame-width (frame-width)))
+            (set-window-text-height window (max 20 (- frame-height 10)))
+            (when (> frame-width 100)
+              (window-resize window (- 100 (window-width window)) t)))
+          (goto-char (point-min))
+          
+          (unwind-protect
+              (org-anki-blocks-sync--handle-conflict-input conflict buffer)
+            (when (window-live-p window)
+              (delete-window window))
+            (when (buffer-live-p buffer)
+              (kill-buffer buffer))))
+      ;; Always reset the lock
+      (setq org-anki-blocks-sync--conflict-resolution-in-progress nil))))
 
 (defun org-anki-blocks-sync--setup-conflict-buffer (local remote id)
   "Setup the conflict resolution buffer with LOCAL and REMOTE fields and ID."
@@ -213,9 +231,9 @@ Set to nil to never auto-purge."
   (let ((choice nil)
         (message-displayed nil))
     (while (not choice)
-      (let ((key (read-key (if message-displayed 
-                              "Invalid choice! Press [l/L]ocal, [r/R]emote, [m]erge, [s]kip, or [q]uit: "
-                            "Choose resolution: "))))
+      (let ((key (read-char-exclusive (if message-displayed 
+                                          "Invalid choice! Press [l/L]ocal, [r/R]emote, [m]erge, [s]kip, or [q]uit: "
+                                        "Choose resolution: "))))
         (cond
          ((eq key ?l) (setq choice 'local))
          ((eq key ?r) (setq choice 'remote))
@@ -277,7 +295,7 @@ Set to nil to never auto-purge."
               (window-resize window (- 100 (window-width window)) t)))
           
           (while (not choice)
-            (let ((key (read-key "Choose field value: ")))
+            (let ((key (read-char-exclusive "Choose field value: ")))
               (cond
                ((eq key ?l) (when local-value
                               (push (cons field-name local-value) merged)
@@ -427,7 +445,19 @@ Returns t if successful, nil if failed."
 
 (defun org-anki-blocks-sync--ask-duplicate-resolution (front-content)
   "Ask user how to resolve duplicate with FRONT-CONTENT."
-  (let ((buffer (get-buffer-create "*Org Anki Duplicate*")))
+  ;; Ensure only one conflict resolution at a time
+  (when org-anki-blocks-sync--conflict-resolution-in-progress
+    (error "Another conflict resolution is already in progress"))
+  
+  (let ((buffer (get-buffer-create "*Org Anki Duplicate*"))
+        (org-anki-blocks-sync--conflict-resolution-in-progress t))
+    
+    ;; Kill any existing conflict/duplicate buffers first
+    (dolist (buf (buffer-list))
+      (when (string-match-p "\\*Org Anki.*\\*" (buffer-name buf))
+        (unless (eq buf buffer)
+          (kill-buffer buf))))
+    
     (with-current-buffer buffer
       (setq buffer-read-only nil)
       (erase-buffer)
@@ -463,25 +493,28 @@ Returns t if successful, nil if failed."
       (goto-char (point-min))
       
       (unwind-protect
-          (let ((choice nil))
-            (while (not choice)
-              (let ((key (read-key "Choose duplicate resolution: ")))
-                (cond
-                 ((eq key ?r) (setq choice 'replace-with-remote))
-                 ((eq key ?R) (setq choice 'replace-with-remote-all))
-                 ((eq key ?l) (setq choice 'replace-with-local))
-                 ((eq key ?L) (setq choice 'replace-with-local-all))
-                 ((eq key ?s) (setq choice 'skip))
-                 ((eq key ?S) (setq choice 'skip-all))
-                 ((eq key ?q) (setq choice 'quit))
-                 (t (message "Invalid choice! Press [r/R], [l/L], [s/S], or [q]")
-                    (sit-for 1)))))
-            choice)
-        ;; Clean up window and buffer
-        (when (window-live-p window)
-          (delete-window window))
-        (when (buffer-live-p buffer)
-          (kill-buffer buffer))))))
+          (unwind-protect
+              (let ((choice nil))
+                (while (not choice)
+                  (let ((key (read-char-exclusive "Choose duplicate resolution: ")))
+                    (cond
+                     ((eq key ?r) (setq choice 'replace-with-remote))
+                     ((eq key ?R) (setq choice 'replace-with-remote-all))
+                     ((eq key ?l) (setq choice 'replace-with-local))
+                     ((eq key ?L) (setq choice 'replace-with-local-all))
+                     ((eq key ?s) (setq choice 'skip))
+                     ((eq key ?S) (setq choice 'skip-all))
+                     ((eq key ?q) (setq choice 'quit))
+                     (t (message "Invalid choice! Press [r/R], [l/L], [s/S], or [q]")
+                        (sit-for 1)))))
+                choice)
+            ;; Clean up window and buffer
+            (when (window-live-p window)
+              (delete-window window))
+            (when (buffer-live-p buffer)
+              (kill-buffer buffer)))
+        ;; Always reset the lock
+        (setq org-anki-blocks-sync--conflict-resolution-in-progress nil)))))
 
 (defun org-anki-blocks-sync--truncate-content (content max-length)
   "Truncate CONTENT to MAX-LENGTH characters for display."
@@ -615,6 +648,67 @@ Returns t if successful, nil if no action taken."
         (message "No duplicates found to delete")
         nil))))  ; Return nil if no duplicates
 
+;;; Pre-sync Matching
+
+(defun org-anki-blocks-sync--match-blocks-without-ids ()
+  "Match local blocks without IDs to existing Anki cards by content.
+Returns number of blocks matched."
+  (let ((blocks-without-ids (cl-remove-if 
+                           (lambda (block)
+                             (org-anki-blocks--get-property block :id))
+                           (org-anki-blocks--find-all)))
+        (matched 0)
+        (errors 0))
+    (when blocks-without-ids
+      (message "Found %d blocks without IDs, attempting to match with Anki..."
+               (length blocks-without-ids))
+      (dolist (block blocks-without-ids)
+        (condition-case err
+            (let* ((deck (org-anki-blocks--get-property block :deck))
+                   (fields (org-anki-blocks--get-fields block))
+                   (front-field (or (cdr (assoc "Front" fields))
+                                   (cdr (assoc "Text" fields))
+                                   (cdr (car fields)))))
+              (when (and deck front-field)
+                ;; Search for exact match in the specified deck
+                (let* ((search-term (substring front-field 0 (min 50 (length front-field))))
+                       (query (format "deck:\"%s\" \"%s\"" deck search-term))
+                       (note-ids (org-anki-blocks-connect--find-notes query)))
+                  (when note-ids
+                    (let* ((notes-info (org-anki-blocks-connect--notes-info note-ids))
+                           (exact-match (org-anki-blocks-sync--find-exact-match fields notes-info)))
+                      (when exact-match
+                        (let ((note-id (alist-get 'noteId exact-match)))
+                          (message "Matched block to existing note ID: %s" note-id)
+                          ;; Update block with ID and hash
+                          (org-anki-blocks--update block
+                                                 :id (format "%s" note-id)
+                                                 :hash (org-anki-blocks-sync--compute-hash 
+                                                       (org-anki-blocks-sync--extract-fields exact-match)))
+                          (cl-incf matched))))))))
+          (error
+           (cl-incf errors)
+           (message "Error matching block: %s" (error-message-string err))))))
+    (when (> matched 0)
+      (message "Successfully matched %d blocks to existing Anki cards" matched))
+    matched))
+
+(defun org-anki-blocks-sync--find-exact-match (fields notes-info)
+  "Find exact matching note from NOTES-INFO for FIELDS.
+Returns the matching note-info or nil."
+  (cl-find-if (lambda (note-info)
+                (let ((remote-fields (org-anki-blocks-sync--extract-fields note-info)))
+                  ;; Check if all fields match exactly
+                  (cl-every (lambda (field)
+                              (let* ((field-name (car field))
+                                     (field-value (cdr field))
+                                     (remote-value (cdr (assoc field-name remote-fields))))
+                                (and remote-value
+                                     (string= (string-trim field-value)
+                                            (string-trim remote-value)))))
+                            fields)))
+              notes-info))
+
 ;;; Main Sync Functions
 
 (defun org-anki-blocks-sync-pull (&optional deck)
@@ -636,7 +730,7 @@ If DECK is specified, only sync cards from that deck."
         (dolist (remote-info notes-info)
           (let* ((id (alist-get 'noteId remote-info))
                  (block (org-anki-blocks--find-by-id id)))
-            (when block
+            (when (and block id) ; Ensure both block and ID exist
               (cond
                ;; Check for conflicts
                ((and (org-anki-blocks-sync--note-modified-p block remote-info)
@@ -703,6 +797,9 @@ If DECK is specified, only sync cards from that deck."
     (unwind-protect
         (progn
           (message "Starting 2-way sync...")
+          ;; First, try to match blocks without IDs to existing Anki cards
+          (org-anki-blocks-sync--match-blocks-without-ids)
+          ;; Then perform regular sync
           (org-anki-blocks-sync-pull)
           (org-anki-blocks-sync-push)
           (message "2-way sync complete"))
